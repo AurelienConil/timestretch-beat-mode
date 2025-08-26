@@ -1,167 +1,74 @@
-# Pure Data DSP External Template
+# timestretch-beat-mode
 
-A comprehensive template for creating DSP externals in Pure Data using [pd-lib-builder](https://github.com/pure-data/pd-lib-builder). This template provides a solid foundation with best practices for building robust, extensible audio processing objects.
+External Pure Data pour timestretch léger basé sur la détection d'attaques
 
-## Features
+## Description
 
-### 🎵 **DSP Processing**
-- **Clean DSP architecture** with proper initialization/cleanup
-- **Sample rate awareness** (automatically adapts to Pure Data's audio settings)
-- **Phase management** without numerical overflow
-- **Performance optimized** audio processing loop
+Ce projet consiste à créer un external Pure Data pour faire du timestretch très léger en CPU. Le principe repose sur :
 
-### 🎛️ **Parameter Control**
-- **Runtime parameter modification** via messages
-- **Validation and error handling** for all parameters
-- **Extensible parameter system** - easily add new parameters
-- **Info system** to query current parameter values
+1. **Analyseur Python** : Analyse préalable d'un fichier audio pour détecter les attaques et créer un fichier `.ana`
+2. **External Pure Data** : Lecture du fichier audio `.wav` en utilisant les informations d'attaques du fichier `.ana` pour un timestretch optimisé
 
-### 🔌 **Pure Data Integration**
-- **Signal inlet** for audio input
-- **Message inlet** for parameter control
-- **Signal outlet** for processed audio
-- **Info outlet** for parameter feedback
+## Installation pour développeurs
 
-## Example: Tremolo Effect
+### 1. Clonage du projet
 
-This template demonstrates a simple tremolo effect that modulates the input signal with a sine wave. It's designed as a **proof of concept** showing all the essential DSP external patterns.
-
-### Usage in Pure Data:
-```
-[helloworld~]  // Create the object
-|
-[set tremolo 4<  // Set tremolo frequency to 4 Hz
-[info<           // Get current parameter values
-```
-
-## Quick Start
-
-### 1. Clone and Build
 ```bash
-git clone --recursive https://github.com/AurelienConil/Pd-external-template.git
-cd Pd-external-template
+git clone https://github.com/AurelienConil/timestretch-beat-mode.git
+cd timestretch-beat-mode
+```
+
+### 2. Initialisation du sous-module
+
+```bash
+git submodule update --init --recursive
+```
+
+### 3. Compilation de l'external
+
+```bash
 make
 ```
 
-### 2. Test in Pure Data
-- Copy `helloworld~.pd_darwin` to your Pure Data externals folder
-- Open `helloworld~-help.pd` for usage examples
-- Connect audio input and try the controls
+Cela génère le fichier `timestretch_beatmode~.pd_darwin` (sur macOS) ou `.pd_linux` (sur Linux).
 
-## Building Your Own External
+### 4. Configuration de l'environnement Python
 
-### 1. **Rename Everything**
+Créer un environnement virtuel et installer les dépendances :
+
 ```bash
-# Rename files
-mv helloworld~.c yourexternal~.c
-mv helloworld~-help.pd yourexternal~-help.pd
-mv helloworld~-meta.pd yourexternal~-meta.pd
-
-# Update Makefile
-lib.name = yourexternal~
+cd python-analyzer
+python3 -m venv analyzer_env
+source analyzer_env/bin/activate  # Sur macOS/Linux
+# ou analyzer_env\Scripts\activate sur Windows
+pip install librosa soundfile
 ```
 
-### 2. **Modify the DSP Processing**
-Replace the tremolo code in `*_perform()` with your own DSP algorithm:
+### 5. Utilisation de l'analyseur Python
 
-```c
-// In yourexternal_tilde_perform()
-while (n--) {
-    // Your DSP processing here
-    *out++ = your_process_function(*in++, your_parameters);
-}
-```
-
-### 3. **Add New Parameters**
-Follow the template pattern:
-
-```c
-// 1. Add to struct
-typedef struct _yourexternal_tilde {
-    // ... existing fields ...
-    t_float your_new_param;  // Add your parameter
-} t_yourexternal_tilde;
-
-// 2. Initialize in constructor
-x->your_new_param = default_value;
-
-// 3. Add parameter handler
-else if (strcmp(param_name, "yourparam") == 0) {
-    set_parameter_float(x, param_name, value, min_val, max_val, &x->your_new_param);
-}
-
-// 4. Add to info output
-send_parameter_info(x, "yourparam", x->your_new_param);
-
-// 5. Use in DSP processing
-// Use x->your_new_param in your perform routine
-```
-
-## Architecture Overview
-
-### **Core Components:**
-
-1. **DSP Chain Integration**
-   - `*_perform()`: Audio processing routine (called for every audio block)
-   - `*_dsp()`: DSP setup (called when audio starts/stops)
-
-2. **Parameter Management**
-   - `parse_set_message()`: Validates incoming messages
-   - `handle_parameter_set()`: Routes parameters to appropriate handlers
-   - `set_parameter_float()`: Generic parameter setter with validation
-
-3. **Message Interface**
-   - `set <param> <value>`: Set parameter values
-   - `info`: Query current parameter state
-
-### **Key Design Principles:**
-
-- ✅ **No malloc/free in perform routine** (performance critical)
-- ✅ **Parameter validation** prevents crashes and invalid states
-- ✅ **Extensible architecture** for easy parameter addition
-- ✅ **Proper DSP lifecycle management**
-- ✅ **Sample rate adaptation** 
-
-## Build Requirements
-
-- **Pure Data source code** ([installation guide](https://puredata.info/docs/developer/GettingPdSource))
-- **C compiler** (GCC, Clang, or MSVC)
-- **Make** build system
-
-### Platform-specific builds:
 ```bash
-# macOS
-make install pdincludepath=../pure-data/src/ objectsdir=./build
-
-# Linux
-make install pdincludepath=../pure-data/src/ objectsdir=./build
-
-# Windows (with MSYS2/MinGW)
-make install pdincludepath=../pure-data/src/ objectsdir=./build
+cd python-analyzer
+python analyze.py votre_fichier.wav
 ```
 
-## Distribution
+Cela génère un fichier `votre_fichier.ana` contenant les informations d'attaques.
 
-### Using deken (recommended):
-```bash
-# Build for distribution
-make install objectsdir=./build
+### 6. Test dans Pure Data
 
-# Upload to Pure Data library (requires puredata.info account)
-deken upload ./build/yourexternal~
+1. Ouvrez Pure Data
+2. Ajoutez le dossier du projet au chemin de recherche de Pure Data
+3. Ouvrez le fichier `timestretch_beatmode~-help.pd` pour voir la documentation et les exemples d'utilisation
+
+
+## Structure du projet
+
 ```
-
-## Contributing
-
-This template is designed to demonstrate best practices for Pure Data external development. Feel free to:
-
-- **Report issues** if you find problems with the template
-- **Suggest improvements** for better DSP patterns
-- **Share your externals** built with this template
-
-## License
-
-This template follows Pure Data's licensing conventions. Adapt as needed for your specific external.
-
----
-
+timestretch-beat-mode/
+├── timestretch_beatmode~.c      # Code source de l'external
+├── timestretch_beatmode~-help.pd # Documentation Pure Data
+├── python-analyzer/             # Analyseur Python
+│   ├── analyze.py              # Script d'analyse principal
+│   └── analyzer_env/           # Environnement virtuel Python
+├── pd-lib-builder/             # Sous-module pour la compilation
+└── Makefile                    # Configuration de compilation
+```
