@@ -1,4 +1,5 @@
 /* timestretch_beatmode~.c - Pure Data external template for timestretch beat mode */
+/* Version avec double pointeur de lecture et crossfade pour réduire l'effet de pompe */
 
 #include "m_pd.h"
 #include <stdio.h>
@@ -44,7 +45,13 @@ typedef struct _timestretch_beatmode_tilde {
     float tempo_ratio;
     unsigned long sample_counter;
     unsigned long global_pos; // position globale en samples
-    // ... autres paramètres ...
+    
+    // Variables pour le double pointeur de lecture
+    int sustain_pos2;          // Position du second pointeur de lecture
+    float crossfade_ratio;     // Ratio de mixage entre les deux pointeurs (0.0 - 1.0)
+    int crossfade_active;      // Indique si un crossfade est en cours
+    int crossfade_length;      // Longueur du crossfade en échantillons
+    int crossfade_counter;     // Compteur pour le crossfade en cours
 } t_timestretch_beatmode_tilde;
 // Helper: read mono wav file (PCM 16 bits)
 #include <stdint.h>
@@ -169,6 +176,14 @@ void timestretch_beatmode_tilde_play(t_timestretch_beatmode_tilde *x, t_symbol *
     x->tempo_ratio = (float)x->tempo_target / (float)x->tempo_original;
     x->sample_counter = 0;
     x->global_pos = 0;
+    
+    // Réinitialisation des variables de double pointeur
+    x->sustain_pos2 = 0;
+    x->crossfade_ratio = 0.0f;
+    x->crossfade_active = 0;
+    x->crossfade_counter = 0;
+    x->crossfade_length = 0;
+    
     t_atom infos[3];
     SETFLOAT(&infos[0], (float)x->audio_length);
     SETFLOAT(&infos[1], (float)x->num_transients);
@@ -190,6 +205,14 @@ void *timestretch_beatmode_tilde_new(void) {
     x->num_transients = 0;
     x->current_transient = 0;
     x->sustain_ms = 200; // valeur par défaut
+    
+    // Initialisation des variables pour le double pointeur
+    x->sustain_pos2 = 0;
+    x->crossfade_ratio = 0.0f;
+    x->crossfade_active = 0;
+    x->crossfade_length = 0;
+    x->crossfade_counter = 0;
+    
     return (void *)x;
 }
 
@@ -292,24 +315,89 @@ static t_int *timestretch_beatmode_tilde_perform(t_int *w) {
             int loop_len = (t_end - t_start) / 2;
             
             // Position dans le loop (revient au début du release à chaque cycle)
-            int loop_pos_source = release_start_source + (x->sustain_pos % loop_len);
+            int loop_pos_source1 = release_start_source + (x->sustain_pos % loop_len);
             
-            // Fenêtre de Hann pour le loop
-            int fade_len = loop_len / 10;
-            float hann = 1.0f;
-            if (x->sustain_pos % loop_len < fade_len) {
-                int fade_pos = x->sustain_pos % loop_len;
-                hann = 0.5f * (1 - cosf(3.14159f * fade_pos / fade_len));
-            } else if (x->sustain_pos % loop_len > loop_len - fade_len) {
-                int fade_pos = (x->sustain_pos % loop_len) - (loop_len - fade_len);
-                hann = 0.5f * (1 - cosf(3.14159f * (fade_len - fade_pos) / fade_len));
+            // Calcul de la progression dans la boucle (0.0 à 1.0)
+            float loop_progress = (float)(x->sustain_pos % loop_len) / (float)loop_len;
+            
+            // Si on approche de la fin de la boucle, démarrer un crossfade
+            if (!x->crossfade_active && loop_progress > 0.6f) { // Démarrer à 60% du cycle
+                x->crossfade_active = 1;
+                x->sustain_pos2 = 0; // Nouveau pointeur au début de la boucle
+                x->crossfade_ratio = 0.0f;
+                x->crossfade_length = (int)(loop_len * 0.7f); // 70% de la longueur de boucle
+                x->crossfade_counter = 0;
             }
             
-            if (loop_pos_source < x->audio_length)
-                out[i] = x->audio_buffer[loop_pos_source] * hann;
-            else
-                out[i] = 0;
+            float output_sample = 0.0f;
+            
+            // Si un crossfade est actif, mixer les deux pointeurs
+            if (x->crossfade_active) {
+                // Position du second pointeur
+                int loop_pos_source2 = release_start_source + (x->sustain_pos2 % loop_len);
                 
+                // Progression du crossfade avec courbe d'ordre 2 (plus douce)
+                float progress = (float)x->crossfade_counter / (float)x->crossfade_length;
+                x->crossfade_ratio = progress * progress; // courbe quadratique
+                
+                // Fenêtres de Hann pour chaque pointeur
+                float hann1 = 1.0f, hann2 = 1.0f;
+                int fade_len = loop_len / 10;
+                
+                // Appliquer le fenêtrage Hann au premier pointeur
+                if (x->sustain_pos % loop_len < fade_len) {
+                    int fade_pos = x->sustain_pos % loop_len;
+                    hann1 = 0.5f * (1 - cosf(3.14159f * fade_pos / fade_len));
+                } else if (x->sustain_pos % loop_len > loop_len - fade_len) {
+                    int fade_pos = (x->sustain_pos % loop_len) - (loop_len - fade_len);
+                    hann1 = 0.5f * (1 - cosf(3.14159f * (fade_len - fade_pos) / fade_len));
+                }
+                
+                // Appliquer le fenêtrage Hann au second pointeur
+                if (x->sustain_pos2 % loop_len < fade_len) {
+                    int fade_pos = x->sustain_pos2 % loop_len;
+                    hann2 = 0.5f * (1 - cosf(3.14159f * fade_pos / fade_len));
+                } else if (x->sustain_pos2 % loop_len > loop_len - fade_len) {
+                    int fade_pos = (x->sustain_pos2 % loop_len) - (loop_len - fade_len);
+                    hann2 = 0.5f * (1 - cosf(3.14159f * (fade_len - fade_pos) / fade_len));
+                }
+                
+                // Lire les deux échantillons avec leur fenêtre respective
+                float sample1 = (loop_pos_source1 < x->audio_length) ? x->audio_buffer[loop_pos_source1] * hann1 : 0.0f;
+                float sample2 = (loop_pos_source2 < x->audio_length) ? x->audio_buffer[loop_pos_source2] * hann2 : 0.0f;
+                
+                // Mixer les échantillons avec le ratio de crossfade
+                output_sample = sample1 * (1.0f - x->crossfade_ratio) + sample2 * x->crossfade_ratio;
+                
+                // Avancer les deux pointeurs et le compteur de crossfade
+                x->crossfade_counter++;
+                x->sustain_pos2++;
+                
+                // Si le crossfade est terminé, le second pointeur devient le principal
+                if (x->crossfade_counter >= x->crossfade_length) {
+                    x->sustain_pos = x->sustain_pos2;
+                    x->crossfade_active = 0;
+                }
+            } else {
+                // Lecture normale avec fenêtre de Hann
+                float hann = 1.0f;
+                int fade_len = loop_len / 10;
+                
+                if (x->sustain_pos % loop_len < fade_len) {
+                    int fade_pos = x->sustain_pos % loop_len;
+                    hann = 0.5f * (1 - cosf(3.14159f * fade_pos / fade_len));
+                } else if (x->sustain_pos % loop_len > loop_len - fade_len) {
+                    int fade_pos = (x->sustain_pos % loop_len) - (loop_len - fade_len);
+                    hann = 0.5f * (1 - cosf(3.14159f * (fade_len - fade_pos) / fade_len));
+                }
+                
+                if (loop_pos_source1 < x->audio_length)
+                    output_sample = x->audio_buffer[loop_pos_source1] * hann;
+                else
+                    output_sample = 0;
+            }
+            
+            out[i] = output_sample;
             x->sustain_pos++;
             
             // Fin du sustain
@@ -317,6 +405,7 @@ static t_int *timestretch_beatmode_tilde_perform(t_int *w) {
                 x->current_transient++;
                 x->in_sustain = 0;
                 x->sustain_pos = 0;
+                x->crossfade_active = 0;
             }
         }
         // Après le dernier transient, lecture brute jusqu'à la fin
