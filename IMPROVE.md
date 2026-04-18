@@ -67,6 +67,13 @@ Générer avec un script Python (librosa/numpy) :
 - [ ] À faire idéalement dans l'analyseur Python (pré-calcul, pas de coût CPU temps réel) → stocker dans le .ana — **pour l'instant fait côté C au chargement, à migrer plus tard**
 - Implémenté : nouveau tableau `release_starts[num_transients]` calculé une fois dans `play()` via `find_zero_crossing_near`. Le sustain lit `release_starts[current_transient]` au lieu du simple midpoint. Clampé dans `[t_start + 1, t_end - 1]`. `loop_len` est recalculé = `t_end - release_start_source` (plus forcément 50% du segment).
 
+### 2.1b — Garde de fin de loop (release_guard) contre le pré-transient  ✅ fait
+- [x] Problème : l'onset détecté par librosa tombe sur le pic d'énergie, mais l'attaque commence souvent 5–10 ms avant. Le sustain qui boucle jusqu'à `t_end - 1` inclut cette pré-attaque → claquement répétitif audible avant chaque transient suivant.
+- [x] Solution : ajouter un tableau `release_ends[num_transients]` = zero-crossing proche de `(t_end - release_guard_samples)`, fenêtre ±guard. `loop_len = release_ends[i] - release_starts[i]`.
+- [x] Message Pd `release_guard <ms>` pour tuner (défaut 14 ms, max 100 ms). Recalcul immédiat des bornes si une audio est déjà chargée.
+- [x] Garanties : `release_end > release_start + 1`, `loop_len ≥ ~10 ms` (sinon on renonce à la garde pour ne pas dégénérer).
+- Implémenté : helper `compute_release_bounds(x)` factorise tout le précalcul des bornes de loop (appelé par `play()` et par le message `release_guard`). Le xfade sustain→next n'est pas affecté : il pré-lit directement depuis `t_start_next`, indépendant de `release_end`.
+
 ### 2.2 — Vrai crossfade entre les cycles du loop  ✅ fait
 - [x] Problème actuel : ton Hann window s'applique dans CHAQUE cycle (fade in au début, fade out à la fin) → chaque cycle a un "trou" au milieu et surtout la jointure entre cycle N et cycle N+1 n'est pas crossfadée, seulement concaténée après atténuation
 - [x] Solution : crossfade additif equal-power entre la fin du cycle N (qui continue au-delà du point de loop) et le début du cycle N+1

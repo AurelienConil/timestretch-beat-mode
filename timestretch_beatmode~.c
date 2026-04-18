@@ -38,6 +38,10 @@ typedef struct _timestretch_beatmode_tilde {
 
     // Point de début de loop (zero-crossing proche du milieu) pré-calculé par segment
     int *release_starts;
+    // Point de fin de loop (zero-crossing proche de t_end - guard) pré-calculé par segment
+    // Garde contre le pré-transient : évite de boucler par-dessus l'amorce du prochain transient
+    int *release_ends;
+    int release_guard_ms; // marge en ms avant le prochain onset (défaut 5 ms)
 
     // Playback state
     int playing;
@@ -65,6 +69,7 @@ static float compute_sustain_sample(const t_timestretch_beatmode_tilde *x,
                                      int release_start, int loop_len,
                                      int sustain_pos, int xfade_len,
                                      int loop_mode);
+static void compute_release_bounds(t_timestretch_beatmode_tilde *x);
 // Helper: read mono wav file (PCM 16 bits)
 #include <stdint.h>
 static int read_wav_file(const char *filename, float **buffer, int *length) {
@@ -178,24 +183,8 @@ void timestretch_beatmode_tilde_play(t_timestretch_beatmode_tilde *x, t_symbol *
             x->playing = 0;
             return;
         }
-        // Pré-calcul des points de début de loop : zero-crossing proche du milieu
-        // du segment (fenêtre ±50 ms). Évite que le loop démarre en plein cycle,
-        // ce qui complète 2.2 (le crossfade masque moins de delta à la jointure).
-        if (x->release_starts) { free(x->release_starts); x->release_starts = NULL; }
-        if (x->num_transients > 0 && x->audio_buffer) {
-            x->release_starts = (int *)malloc(sizeof(int) * x->num_transients);
-            int window = (int)(x->sample_rate * 0.05f); // ±50 ms
-            for (int i = 0; i < x->num_transients; i++) {
-                int t_start = x->transients[i];
-                int t_end = (i + 1 < x->num_transients) ? x->transients[i+1] : x->audio_length;
-                int midpoint = t_start + (t_end - t_start) / 2;
-                int rs = find_zero_crossing_near(x->audio_buffer, x->audio_length, midpoint, window);
-                // Sécurité : doit rester strictement à l'intérieur du segment.
-                if (rs < t_start + 1) rs = t_start + 1;
-                if (rs > t_end - 1)   rs = t_end - 1;
-                x->release_starts[i] = rs;
-            }
-        }
+        // Pré-calcul des bornes de loop (zero-crossings) pour chaque segment.
+        compute_release_bounds(x);
         x->playing = 1;
         x->current_transient = 0;
         x->play_pos = 0;
@@ -229,11 +218,64 @@ void *timestretch_beatmode_tilde_new(void) {
     x->transients = NULL;
     x->num_transients = 0;
     x->release_starts = NULL;
+    x->release_ends = NULL;
+    x->release_guard_ms = 14; // 14 ms de garde avant le prochain onset par défaut
     x->current_transient = 0;
     x->sustain_ms = 200; // valeur par défaut
     x->envelope = 100;   // pas de fade-out par défaut
     x->loop_mode = 1;    // forward loop par défaut
     return (void *)x;
+}
+
+// Pré-calcule les bornes de loop [release_starts[i], release_ends[i]) pour chaque segment :
+//  - release_start : zero-crossing proche du milieu du segment (fenêtre ±50 ms)
+//  - release_end   : zero-crossing proche de (t_end - release_guard), fenêtre ±(guard ou 5 ms)
+//    Garde contre le pré-transient : l'onset détecté par librosa tombe sur le pic d'énergie,
+//    mais l'attaque commence souvent quelques ms avant. Sans garde, ces samples de pré-attaque
+//    sont bouclés → claquement répétitif.
+// Le loop est en plus garanti ≥ 10 ms pour éviter les dégénérescences.
+static void compute_release_bounds(t_timestretch_beatmode_tilde *x) {
+    if (x->release_starts) { free(x->release_starts); x->release_starts = NULL; }
+    if (x->release_ends)   { free(x->release_ends);   x->release_ends   = NULL; }
+    if (x->num_transients <= 0 || !x->audio_buffer) return;
+    x->release_starts = (int *)malloc(sizeof(int) * x->num_transients);
+    x->release_ends   = (int *)malloc(sizeof(int) * x->num_transients);
+    int mid_window = (int)(x->sample_rate * 0.05f);                       // ±50 ms
+    int guard      = (int)(x->sample_rate * (x->release_guard_ms / 1000.0f));
+    int end_window = guard > 0 ? guard : (int)(x->sample_rate * 0.005f);  // ±5 ms mini
+    int min_loop   = (int)(x->sample_rate * 0.01f);                       // loop ≥ 10 ms
+    for (int i = 0; i < x->num_transients; i++) {
+        int t_start = x->transients[i];
+        int t_end   = (i + 1 < x->num_transients) ? x->transients[i+1] : x->audio_length;
+
+        // Début de loop : zero-crossing au milieu du segment.
+        int midpoint = t_start + (t_end - t_start) / 2;
+        int rs = find_zero_crossing_near(x->audio_buffer, x->audio_length, midpoint, mid_window);
+        if (rs < t_start + 1) rs = t_start + 1;
+        if (rs > t_end - 2)   rs = t_end - 2;
+
+        // Fin de loop : zero-crossing proche de (t_end - guard).
+        int target_end = t_end - guard;
+        if (target_end < rs + min_loop) target_end = rs + min_loop;
+        if (target_end > t_end - 1)     target_end = t_end - 1;
+        int re = find_zero_crossing_near(x->audio_buffer, x->audio_length, target_end, end_window);
+        if (re <= rs + 1)   re = rs + 1;
+        if (re > t_end - 1) re = t_end - 1;
+
+        x->release_starts[i] = rs;
+        x->release_ends[i]   = re;
+    }
+}
+
+// Message `release_guard <ms>` : marge en ms entre la fin du loop et le prochain onset.
+// Évite que le sustain boucle par-dessus l'amorce du prochain transient (pré-attaque
+// qui précède le pic détecté par l'analyseur).
+void timestretch_beatmode_tilde_release_guard(t_timestretch_beatmode_tilde *x, t_floatarg f) {
+    int v = (int)f;
+    if (v < 0) v = 0;
+    if (v > 100) v = 100; // garde max 100 ms
+    x->release_guard_ms = v;
+    compute_release_bounds(x); // recalcule immédiatement (no-op si rien n'est chargé)
 }
 
 // Message `loop_mode <0|1|2>` :
@@ -482,7 +524,10 @@ static t_int *timestretch_beatmode_tilde_perform(t_int *w) {
                 int release_start_source = x->release_starts
                     ? x->release_starts[x->current_transient]
                     : (t_start + (t_end - t_start) / 2);
-                int loop_len = t_end - release_start_source;
+                int release_end_source = x->release_ends
+                    ? x->release_ends[x->current_transient]
+                    : t_end;
+                int loop_len = release_end_source - release_start_source;
                 if (loop_len < 1) loop_len = 1;
 
                 // xfade interne au loop : clampé à 1/4 de loop_len
@@ -520,7 +565,11 @@ static t_int *timestretch_beatmode_tilde_perform(t_int *w) {
             int release_start_source = x->release_starts
                 ? x->release_starts[x->current_transient]
                 : (t_start + (t_end - t_start) / 2);
-            int loop_len = t_end - release_start_source;
+            // Fin de loop : zero-crossing avant (t_end - guard), ou fallback t_end
+            int release_end_source = x->release_ends
+                ? x->release_ends[x->current_transient]
+                : t_end;
+            int loop_len = release_end_source - release_start_source;
             if (loop_len < 1) loop_len = 1;
 
             // xfade interne au loop : clampé à 1/4 de loop_len pour rester sain
@@ -606,5 +655,7 @@ void timestretch_beatmode_tilde_setup(void) {
         (t_method)timestretch_beatmode_tilde_envelope, gensym("envelope"), A_FLOAT, 0);
     class_addmethod(timestretch_beatmode_tilde_class,
         (t_method)timestretch_beatmode_tilde_loop_mode, gensym("loop_mode"), A_FLOAT, 0);
+    class_addmethod(timestretch_beatmode_tilde_class,
+        (t_method)timestretch_beatmode_tilde_release_guard, gensym("release_guard"), A_FLOAT, 0);
     CLASS_MAINSIGNALIN(timestretch_beatmode_tilde_class, t_timestretch_beatmode_tilde, f);
 }
