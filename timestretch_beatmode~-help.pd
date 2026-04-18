@@ -2,7 +2,6 @@
 #X text 13 10 prints "Hello world!" when banged.;
 #X obj 124 329 output~;
 #X obj 436 279 print;
-#X msg 289 192 info;
 #X obj 134 218 timestretch_beatmode~;
 #X obj 279 252 list trim;
 #X obj 424 43 openpanel;
@@ -27,10 +26,10 @@
 #X connect 6 0 16 1;
 #X connect 7 0 6 0;
 #X connect 9 0 10 0;
-#X connect 10 0 11 0;
-#X connect 10 1 12 0;
-#X connect 13 0 16 0;
-#X connect 14 0 16 0;
+#X connect 9 1 11 0;
+#X connect 12 0 15 0;
+#X connect 13 0 15 0;
+#X connect 14 0 15 0;
 #X connect 15 0 16 0;
 #X connect 16 0 17 0;
 #X connect 17 0 4 0;
