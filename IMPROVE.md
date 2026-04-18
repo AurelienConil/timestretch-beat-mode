@@ -41,14 +41,16 @@ Générer avec un script Python (librosa/numpy) :
 - [ ] Solution : utiliser un flag `attack_started` qui se déclenche au premier passage dans la zone, plus robuste
 - [ ] Tester avec ratio = 0.73, 1.37, etc. (ratios qui tombent mal)
 
-### 1.2 — Transition attaque → sustain
-- [ ] Problème : passage sec d'une lecture 1:1 à une lecture bouclée fenêtrée → clic systématique
-- [ ] Solution : crossfade de 5-10 ms entre les deux modes (garder en mémoire les derniers samples de l'attaque, les mixer avec les premiers samples du loop)
+### 1.2 — Transition attaque → sustain  ✅ fait
+- [x] Problème : passage sec d'une lecture 1:1 à une lecture bouclée fenêtrée → clic systématique
+- [x] Solution : crossfade de 5-10 ms entre les deux modes (garder en mémoire les derniers samples de l'attaque, les mixer avec les premiers samples du loop)
+- Implémenté : crossfade equal-power (cos/sin) de 5 ms sur les derniers `local_xfade` samples de la zone d'attaque. En parallèle de la lecture 1:1 on pré-lit le début du loop de sustain (avec sa fenêtre de Hann), puis on mixe les deux. Le `sustain_pos` reprend à `local_xfade` quand on entre en sustain « plein ». `local_xfade` est clampé à 1/3 de l'attaque et 1/3 du sustain du segment pour gérer les segments très courts.
 
-### 1.3 — Crossfade entre fin de segment et début du segment suivant
-- [ ] Problème : quand un segment se termine (`pos_global == t_end_output`), on saute directement au début du segment suivant → discontinuité
-- [ ] Solution : crossfade equal-power de 5-10 ms entre la queue du segment courant et l'attaque du segment suivant
-- [ ] Attention : cela ne doit PAS retarder le transient suivant (le crossfade doit commencer AVANT l'attaque)
+### 1.3 — Crossfade entre fin de segment et début du segment suivant  ✅ fait
+- [x] Problème : quand un segment se termine (`pos_global == t_end_output`), on saute directement au début du segment suivant → discontinuité
+- [x] Solution : crossfade equal-power de 5-10 ms entre la queue du segment courant et l'attaque du segment suivant
+- [x] Attention : cela ne doit PAS retarder le transient suivant (le crossfade doit commencer AVANT l'attaque)
+- Implémenté : crossfade equal-power de `local_xfade` samples finissant exactement à `t_end_output_d`. Pendant cette zone on continue à lire le loop de sustain (fade-out) et on pré-lit l'attaque du prochain segment depuis `t_start_next` (fade-in). Le champ `attack_preroll` transmet au bloc attaque suivant le nombre de samples déjà consommés, pour que `play_pos` reprenne sans discontinuité. Pas de crossfade pour le dernier segment (`has_next == 0`).
 
 ### 1.4 — Safety sur pos_global avec samples flottants
 - [ ] Actuellement `(int)pos_global` compare avec des positions calculées en float via tempo_ratio → drift possible sur longues durées
@@ -58,29 +60,33 @@ Générer avec un script Python (librosa/numpy) :
 
 ## Phase 2 — Améliorations du sustain (cœur du problème)
 
-### 2.1 — Point de début de loop sur zero-crossing
-- [ ] Problème actuel : `release_start_source = t_start + (t_end - t_start) / 2` tombe n'importe où, y compris en plein milieu d'un cycle
-- [ ] Solution : chercher le zero-crossing le plus proche du milieu, dans une fenêtre de ± 50 ms
-- [ ] Préférer les zero-crossings avec la même pente (ascendante → ascendante) pour éviter les inversions de phase
-- [ ] À faire idéalement dans l'analyseur Python (pré-calcul, pas de coût CPU temps réel) → stocker dans le .ana
+### 2.1 — Point de début de loop sur zero-crossing  ✅ fait (côté C, sans pente)
+- [x] Problème actuel : `release_start_source = t_start + (t_end - t_start) / 2` tombe n'importe où, y compris en plein milieu d'un cycle
+- [x] Solution : chercher le zero-crossing le plus proche du milieu, dans une fenêtre de ± 50 ms
+- [ ] Préférer les zero-crossings avec la même pente (ascendante → ascendante) pour éviter les inversions de phase — **pas encore fait**
+- [ ] À faire idéalement dans l'analyseur Python (pré-calcul, pas de coût CPU temps réel) → stocker dans le .ana — **pour l'instant fait côté C au chargement, à migrer plus tard**
+- Implémenté : nouveau tableau `release_starts[num_transients]` calculé une fois dans `play()` via `find_zero_crossing_near`. Le sustain lit `release_starts[current_transient]` au lieu du simple midpoint. Clampé dans `[t_start + 1, t_end - 1]`. `loop_len` est recalculé = `t_end - release_start_source` (plus forcément 50% du segment).
 
-### 2.2 — Vrai crossfade entre les cycles du loop
-- [ ] Problème actuel : ton Hann window s'applique dans CHAQUE cycle (fade in au début, fade out à la fin) → chaque cycle a un "trou" au milieu et surtout la jointure entre cycle N et cycle N+1 n'est pas crossfadée, seulement concaténée après atténuation
-- [ ] Solution : crossfade additif equal-power entre la fin du cycle N (qui continue au-delà du point de loop) et le début du cycle N+1
-- [ ] Longueur recommandée : 10-20 ms, ou 5-10% de la longueur du loop (selon ce qui est le plus petit)
+### 2.2 — Vrai crossfade entre les cycles du loop  ✅ fait
+- [x] Problème actuel : ton Hann window s'applique dans CHAQUE cycle (fade in au début, fade out à la fin) → chaque cycle a un "trou" au milieu et surtout la jointure entre cycle N et cycle N+1 n'est pas crossfadée, seulement concaténée après atténuation
+- [x] Solution : crossfade additif equal-power entre la fin du cycle N (qui continue au-delà du point de loop) et le début du cycle N+1
+- [x] Longueur recommandée : 10-20 ms, ou 5-10% de la longueur du loop (selon ce qui est le plus petit)
+- Implémenté : helper `compute_sustain_sample` à modèle overlap-add deux grains. `cycle_period = loop_len - xfade_len` ; chaque grain lit `loop_len` samples en source et ses `xfade_len` premiers/derniers samples ont une enveloppe equal-power (sin/cos). Le grain précédent continue à se jouer sur la queue pendant le début du grain suivant → somme à puissance constante à la jointure, plus de « trou » au milieu du cycle. `loop_xfade` clampé à 5 ms et à 1/4 de `loop_len`. Fallback loop simple si `loop_len` est trop court.
 
-### 2.3 — Mode Back-and-Forth (ping-pong loop)
-- [ ] Implémenter comme alternative au forward loop
-- [ ] Alterner direction de lecture à chaque cycle : forward → backward → forward → ...
-- [ ] Bénéfice : sur des sons avec décroissance naturelle (piano, cymbales, pads), élimine 80% de l'effet "répétition audible"
-- [ ] Pas besoin de crossfade aussi agressif car les jointures se font naturellement à des points symétriques
-- [ ] Ajouter un argument `loop_mode` (0 = off, 1 = forward, 2 = back-and-forth)
+### 2.3 — Mode Back-and-Forth (ping-pong loop)  ✅ fait
+- [x] Implémenter comme alternative au forward loop
+- [x] Alterner direction de lecture à chaque cycle : forward → backward → forward → ...
+- [x] Bénéfice : sur des sons avec décroissance naturelle (piano, cymbales, pads), élimine 80% de l'effet "répétition audible"
+- [x] Pas besoin de crossfade aussi agressif car les jointures se font naturellement à des points symétriques
+- [x] Ajouter un argument `loop_mode` (0 = off, 1 = forward, 2 = back-and-forth)
+- Implémenté : champ `loop_mode` (défaut 1) + message Pd `loop_mode <0|1|2>`. `compute_sustain_sample` prend maintenant `loop_mode` en paramètre. En mode 2, chaque grain a une parité : `grain_idx` pair → forward (`src = release_start + local`), impair → backward (`src = release_start + loop_len - 1 - local`). Le grain B (précédent, fade-out) a la parité opposée. Résultat : la jointure entre grain N et grain N+1 se fait sur la même zone source (autour de `release_start + loop_len - 1`) → continuité naturelle, pas d'inversion de phase violente. Le mode 0 (silence pendant le sustain) est câblé côté `perform` en gate avant l'appel à `compute_sustain_sample` ; le crossfade sustain→next fait un fade-in propre du prochain transient depuis le silence. Cela couvre partiellement 2.5 (le vrai 2.5 « lecture du segment jusqu'à sa fin naturelle » reste à faire).
 
-### 2.4 — Transient Envelope (fade-out de fin de segment)
-- [ ] C'est le paramètre "Envelope" d'Ableton
-- [ ] Appliquer une enveloppe de fade-out exponentielle sur chaque segment, avant le prochain transient
-- [ ] Paramètre utilisateur de 0 à 100 : 100 = pas de fade, 0 = gate très rapide après le transient
-- [ ] Masque très efficacement les artefacts de jointure et les loops trop audibles
+### 2.4 — Transient Envelope (fade-out de fin de segment)  ✅ fait
+- [x] C'est le paramètre "Envelope" d'Ableton
+- [x] Appliquer une enveloppe de fade-out exponentielle sur chaque segment, avant le prochain transient
+- [x] Paramètre utilisateur de 0 à 100 : 100 = pas de fade, 0 = gate très rapide après le transient
+- [x] Masque très efficacement les artefacts de jointure et les loops trop audibles
+- Implémenté : nouveau champ `envelope` dans la struct (0..100, défaut 100) et message `envelope <n>` Pd. Formule `amp(t) = (envelope/100)^(t/durée_segment)` avec t normalisé à [0,1] : exponentielle, donc au milieu du segment on est à √(envelope/100). Cas spéciaux : 100 → 1 partout (pas de powf), 0 → gate immédiat après le premier sample. L'enveloppe s'applique UNIQUEMENT au segment courant ; dans le crossfade sustain→next, seule la partie `sustain_sample` est multipliée par `env_current`, le `next_attack_sample` reste intact (sinon le transient pré-lu serait écrasé par l'enveloppe au minimum de son décay).
 
 ### 2.5 — Mode Loop Off
 - [ ] Implémenter le cas "pas de loop du tout" : on joue le segment jusqu'à sa fin naturelle, puis silence jusqu'au transient suivant
